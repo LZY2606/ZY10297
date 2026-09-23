@@ -73,6 +73,7 @@ things:
   - [Perform instrumentation](#perform-instrumentation)
   - [Specify namespace and subsystem](#specify-namespace-and-subsystem)
   - [Specify static custom labels](#specify-static-custom-labels)
+  - [Limiting label cardinality](#limiting-label-cardinality)
   - [Exposing endpoint](#exposing-endpoint)
 - [Contributing](#contributing)
 - [Licensing](#licensing)
@@ -296,6 +297,44 @@ Instrumentator().add(
     ),
 ).instrument(app).expose(app)
 ```
+
+### Limiting label cardinality
+
+Untemplated paths, unexpected status values or user-controlled label values
+can make the number of time series of a metric family grow without bounds. To
+protect against this you can configure a per-metric-family label cardinality
+budget. It is opt-in: without a budget, cardinality stays unlimited.
+
+```python
+from prometheus_fastapi_instrumentator import LabelCardinalityBudget
+
+budget = LabelCardinalityBudget(
+    max_cardinality=1000,  # Distinct label tuples per metric family.
+    max_label_cardinality={"handler": 100},  # Distinct values per label.
+    strategy="overflow",  # "drop", "overflow" or "observer".
+)
+
+Instrumentator(label_cardinality_budget=budget).instrument(app).expose(app)
+```
+
+You can also pass the budget to individual metric closures, for example
+`metrics.requests(..., label_cardinality_budget=budget)`.
+
+The budget decision is made before the actual observation. Once a metric
+family exceeds its total or per-label limit, new label tuples are either
+dropped (`"drop"`), folded into a single fixed overflow identity where every
+label value is `"__overflow__"` (`"overflow"`, the default), or reported to
+an observer callable (`"observer"`). The observer receives a
+`CardinalityEvent` with the family name, label names, reason and structured
+counters. It never contains label values, so high-cardinality (potentially
+sensitive) strings are not written to logs. Aggregated, value-free counters
+are also available via `budget.stats()`, and `budget.reset()` forgets all
+confirmed tuples.
+
+Note that the budget state is scoped to the registry the metric family is
+registered with and lives in the current process only. In multi-worker
+setups each worker enforces its own budget; the limits are not shared
+across processes.
 
 ### Exposing endpoint
 

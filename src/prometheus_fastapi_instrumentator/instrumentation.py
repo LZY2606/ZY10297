@@ -28,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from prometheus_fastapi_instrumentator import metrics
+from prometheus_fastapi_instrumentator.cardinality import LabelCardinalityBudget
 from prometheus_fastapi_instrumentator.middleware import (
     PrometheusInstrumentatorMiddleware,
 )
@@ -51,6 +52,7 @@ class PrometheusFastApiInstrumentator:
         inprogress_name: str = "http_requests_inprogress",
         inprogress_labels: bool = False,
         registry: Union[CollectorRegistry, None] = None,
+        label_cardinality_budget: Union[LabelCardinalityBudget, None] = None,
     ) -> None:
         """Create a Prometheus FastAPI (and Starlette) Instrumentator.
 
@@ -120,6 +122,11 @@ class PrometheusFastApiInstrumentator:
                 you need to run multiple apps at the same time, with their own
                 registries, for example during testing.
 
+            label_cardinality_budget (LabelCardinalityBudget): Optional budget that
+                limits the number of distinct label tuples per metric family
+                created by the default instrumentation. Only relevant if no custom
+                instrumentations are added. Defaults to `None` (unlimited).
+
         Raises:
             ValueError: If `PROMETHEUS_MULTIPROC_DIR` env var is found but
                 doesn't point to a valid directory.
@@ -138,6 +145,7 @@ class PrometheusFastApiInstrumentator:
         self.env_var_name = env_var_name
         self.inprogress_name = inprogress_name
         self.inprogress_labels = inprogress_labels
+        self.label_cardinality_budget = label_cardinality_budget
 
         self.excluded_handlers = [re.compile(path) for path in excluded_handlers]
         self.body_handlers = [re.compile(path) for path in body_handlers]
@@ -242,6 +250,7 @@ class PrometheusFastApiInstrumentator:
             latency_highr_buckets=latency_highr_buckets,
             latency_lowr_buckets=latency_lowr_buckets,
             registry=self.registry,
+            label_cardinality_budget=self.label_cardinality_budget,
         )
         return self
 

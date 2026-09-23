@@ -16,6 +16,67 @@ from prometheus_client import REGISTRY, CollectorRegistry, Counter, Histogram, S
 from starlette.requests import Request
 from starlette.responses import Response
 
+from prometheus_fastapi_instrumentator.cardinality import (
+    LabelCardinalityBudget,
+    LabelCardinalityGate,
+)
+
+
+def _full_metric_name(
+    metric_namespace: str, metric_subsystem: str, metric_name: str
+) -> str:
+    """Builds the fully qualified metric family name."""
+
+    return "_".join(
+        part for part in (metric_namespace, metric_subsystem, metric_name) if part
+    )
+
+
+def _create_gate(
+    budget: Optional[LabelCardinalityBudget],
+    metric_namespace: str,
+    metric_subsystem: str,
+    metric_name: str,
+    label_names: List[str],
+) -> Optional[LabelCardinalityGate]:
+    """Creates a cardinality gate for a metric family if a budget is set."""
+
+    if budget is None or not label_names:
+        return None
+    return budget.gate_for(
+        _full_metric_name(metric_namespace, metric_subsystem, metric_name),
+        label_names,
+    )
+
+
+def _apply_gate(
+    gate: Optional[LabelCardinalityGate], label_values: List[str]
+) -> Optional[List[str]]:
+    """Applies the cardinality gate to label values before observing.
+
+    Returns the label values to use (possibly mapped to the overflow
+    identity), or `None` if the observation must be dropped.
+    """
+
+    if gate is None:
+        return label_values
+    gated = gate.check(label_values)
+    if gated is None:
+        return None
+    return list(gated)
+
+
+def _gated_call(
+    gate: Optional[LabelCardinalityGate],
+    label_values: List[str],
+    func: Callable[[List[str]], None],
+) -> None:
+    """Applies the gate and only calls `func` if the tuple is admitted."""
+
+    gated_values = _apply_gate(gate, label_values)
+    if gated_values is not None:
+        func(gated_values)
+
 
 # ------------------------------------------------------------------------------
 class Info:
@@ -122,6 +183,7 @@ def latency(
     buckets: Sequence[Union[float, str]] = Histogram.DEFAULT_BUCKETS,
     registry: CollectorRegistry = REGISTRY,
     custom_labels: dict = {},
+    label_cardinality_budget: Optional[LabelCardinalityBudget] = None,
 ) -> Optional[Callable[[Info], None]]:
     """Default metric for the Prometheus Starlette Instrumentator.
 
@@ -152,6 +214,10 @@ def latency(
 
         buckets: Buckets for the histogram. Defaults to Prometheus default.
             Defaults to default buckets from Prometheus client library.
+
+        label_cardinality_budget: Optional budget that limits the number of
+            distinct label tuples for this metric family. Defaults to `None`
+            (unlimited).
 
     Returns:
         Function that takes a single parameter `Info`.
@@ -195,6 +261,14 @@ def latency(
                 registry=registry,
             )
 
+        gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            metric_name,
+            label_names,
+        )
+
         def instrumentation(info: Info) -> None:
             duration = info.modified_duration
             if should_exclude_streaming_duration:
@@ -207,6 +281,10 @@ def latency(
                     getattr(info, attribute_name)
                     for attribute_name in info_attribute_names
                 ]
+
+                label_values = _apply_gate(gate, label_values)
+                if label_values is None:
+                    return
 
                 METRIC.labels(*label_values).observe(duration)
             else:
@@ -230,6 +308,7 @@ def request_size(
     should_include_status: bool = True,
     registry: CollectorRegistry = REGISTRY,
     custom_labels: dict = {},
+    label_cardinality_budget: Optional[LabelCardinalityBudget] = None,
 ) -> Optional[Callable[[Info], None]]:
     """Record the content length of incoming requests.
 
@@ -250,6 +329,10 @@ def request_size(
             metric? Defaults to `True`.
         should_include_status: Should the `status` label be part of the metric?
             Defaults to `True`.
+
+        label_cardinality_budget: Optional budget that limits the number of
+            distinct label tuples for this metric family. Defaults to `None`
+            (unlimited).
 
     Returns:
         Function that takes a single parameter `Info`.
@@ -288,6 +371,14 @@ def request_size(
                 registry=registry,
             )
 
+        gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            metric_name,
+            label_names,
+        )
+
         def instrumentation(info: Info) -> None:
             content_length = info.request.headers.get("Content-Length", 0)
             if label_names:
@@ -295,6 +386,10 @@ def request_size(
                     getattr(info, attribute_name)
                     for attribute_name in info_attribute_names
                 ]
+
+                label_values = _apply_gate(gate, label_values)
+                if label_values is None:
+                    return
 
                 METRIC.labels(*label_values).observe(int(content_length))
             else:
@@ -318,6 +413,7 @@ def response_size(
     should_include_status: bool = True,
     registry: CollectorRegistry = REGISTRY,
     custom_labels: dict = {},
+    label_cardinality_budget: Optional[LabelCardinalityBudget] = None,
 ) -> Optional[Callable[[Info], None]]:
     """Record the content length of outgoing responses.
 
@@ -345,6 +441,10 @@ def response_size(
         should_include_status: Should the `status` label be part of the metric?
             Defaults to `True`.
 
+        label_cardinality_budget: Optional budget that limits the number of
+            distinct label tuples for this metric family. Defaults to `None`
+            (unlimited).
+
     Returns:
         Function that takes a single parameter `Info`.
     """
@@ -382,6 +482,14 @@ def response_size(
                 registry=registry,
             )
 
+        gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            metric_name,
+            label_names,
+        )
+
         def instrumentation(info: Info) -> None:
             if info.response and hasattr(info.response, "headers"):
                 content_length = info.response.headers.get("Content-Length", 0)
@@ -393,6 +501,10 @@ def response_size(
                     getattr(info, attribute_name)
                     for attribute_name in info_attribute_names
                 ]
+
+                label_values = _apply_gate(gate, label_values)
+                if label_values is None:
+                    return
 
                 METRIC.labels(*label_values).observe(int(content_length))
             else:
@@ -416,6 +528,7 @@ def combined_size(
     should_include_status: bool = True,
     registry: CollectorRegistry = REGISTRY,
     custom_labels: dict = {},
+    label_cardinality_budget: Optional[LabelCardinalityBudget] = None,
 ) -> Optional[Callable[[Info], None]]:
     """Record the combined content length of requests and responses.
 
@@ -443,6 +556,10 @@ def combined_size(
         should_include_status: Should the `status` label be part of the metric?
             Defaults to `True`.
 
+        label_cardinality_budget: Optional budget that limits the number of
+            distinct label tuples for this metric family. Defaults to `None`
+            (unlimited).
+
     Returns:
         Function that takes a single parameter `Info`.
     """
@@ -479,6 +596,14 @@ def combined_size(
                 registry=registry,
             )
 
+        gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            metric_name,
+            label_names,
+        )
+
         def instrumentation(info: Info) -> None:
             request_cl = info.request.headers.get("Content-Length", 0)
 
@@ -494,6 +619,10 @@ def combined_size(
                     getattr(info, attribute_name)
                     for attribute_name in info_attribute_names
                 ]
+
+                label_values = _apply_gate(gate, label_values)
+                if label_values is None:
+                    return
 
                 METRIC.labels(*label_values).observe(int(content_length))
             else:
@@ -517,6 +646,7 @@ def requests(
     should_include_status: bool = True,
     registry: CollectorRegistry = REGISTRY,
     custom_labels: dict = {},
+    label_cardinality_budget: Optional[LabelCardinalityBudget] = None,
 ) -> Optional[Callable[[Info], None]]:
     """Record the number of requests.
 
@@ -542,6 +672,10 @@ def requests(
         should_include_status (bool, optional): Should the `status` label be
             part of the metric? Defaults to `True`.
 
+        label_cardinality_budget: Optional budget that limits the number of
+            distinct label tuples for this metric family. Defaults to `None`
+            (unlimited).
+
     Returns:
         Function that takes a single parameter `Info`.
     """
@@ -579,12 +713,24 @@ def requests(
                 registry=registry,
             )
 
+        gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            metric_name,
+            label_names,
+        )
+
         def instrumentation(info: Info) -> None:
             if label_names:
                 label_values = [
                     getattr(info, attribute_name)
                     for attribute_name in info_attribute_names
                 ]
+
+                label_values = _apply_gate(gate, label_values)
+                if label_values is None:
+                    return
 
                 METRIC.labels(*label_values).inc()
             else:
@@ -644,6 +790,7 @@ def default(
     latency_lowr_buckets: Sequence[Union[float, str]] = (0.1, 0.5, 1),
     registry: CollectorRegistry = REGISTRY,
     custom_labels: dict = {},
+    label_cardinality_budget: Optional[LabelCardinalityBudget] = None,
 ) -> Optional[Callable[[Info], None]]:
     """Contains multiple metrics to cover multiple things.
 
@@ -686,6 +833,10 @@ def default(
         latency_lowr_buckets (tuple[float], optional): Buckets tuple for low
             res histogram. Should be very small as all possible labels are
             included. Defaults to `(0.1, 0.5, 1)`.
+
+        label_cardinality_budget: Optional budget that limits the number of
+            distinct label tuples per metric family created by this function.
+            Defaults to `None` (unlimited).
 
     Returns:
         Function that takes a single parameter `Info`.
@@ -776,6 +927,35 @@ def default(
             registry=registry,
         )
 
+        total_gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            "http_requests_total",
+            list(total_label_names + additional_label_names),
+        )
+        in_size_gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            "http_request_size_bytes",
+            list(in_size_names + additional_label_names),
+        )
+        out_size_gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            "http_response_size_bytes",
+            list(out_size_names + additional_label_names),
+        )
+        latency_lowr_gate = _create_gate(
+            label_cardinality_budget,
+            metric_namespace,
+            metric_subsystem,
+            "http_request_duration_seconds",
+            list(latency_lower_names + additional_label_names),
+        )
+
         def instrumentation(info: Info) -> None:
             duration = info.modified_duration
             if should_exclude_streaming_duration:
@@ -787,26 +967,36 @@ def default(
                 getattr(info, attribute_name)
                 for attribute_name in _map_label_name_value(total_label_names)
             ] + list(custom_labels.values())
-            TOTAL.labels(*label_values).inc()
+            _gated_call(
+                total_gate, label_values, lambda values: TOTAL.labels(*values).inc()
+            )
 
             label_values = [
                 getattr(info, attribute_name)
                 for attribute_name in _map_label_name_value(in_size_names)
             ] + list(custom_labels.values())
-            IN_SIZE.labels(*label_values).observe(
-                int(info.request.headers.get("Content-Length", 0))
+            _gated_call(
+                in_size_gate,
+                label_values,
+                lambda values: IN_SIZE.labels(*values).observe(
+                    int(info.request.headers.get("Content-Length", 0))
+                ),
             )
 
             label_values = [
                 getattr(info, attribute_name)
                 for attribute_name in _map_label_name_value(out_size_names)
             ] + list(custom_labels.values())
+            response_content_length = 0
             if info.response and hasattr(info.response, "headers"):
-                OUT_SIZE.labels(*label_values).observe(
-                    int(info.response.headers.get("Content-Length", 0))
+                response_content_length = int(
+                    info.response.headers.get("Content-Length", 0)
                 )
-            else:
-                OUT_SIZE.labels(*label_values).observe(0)
+            _gated_call(
+                out_size_gate,
+                label_values,
+                lambda values: OUT_SIZE.labels(*values).observe(response_content_length),
+            )
 
             if not should_only_respect_2xx_for_highr or info.modified_status.startswith(
                 "2"
@@ -817,7 +1007,11 @@ def default(
                 getattr(info, attribute_name)
                 for attribute_name in _map_label_name_value(latency_lower_names)
             ] + list(custom_labels.values())
-            LATENCY_LOWR.labels(*label_values).observe(duration)
+            _gated_call(
+                latency_lowr_gate,
+                label_values,
+                lambda values: LATENCY_LOWR.labels(*values).observe(duration),
+            )
 
         return instrumentation
 

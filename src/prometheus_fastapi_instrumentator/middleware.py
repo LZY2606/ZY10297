@@ -13,6 +13,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from prometheus_fastapi_instrumentator import metrics, routing
+from prometheus_fastapi_instrumentator.cardinality import LabelCardinalityBudget
 
 
 class PrometheusInstrumentatorMiddleware:
@@ -67,6 +68,7 @@ class PrometheusInstrumentatorMiddleware:
         latency_lowr_buckets: Sequence[Union[float, str]] = (0.1, 0.5, 1),
         registry: CollectorRegistry = REGISTRY,
         custom_labels: dict = {},
+        label_cardinality_budget: Optional[LabelCardinalityBudget] = None,
     ) -> None:
         self.app = app
 
@@ -100,6 +102,7 @@ class PrometheusInstrumentatorMiddleware:
                 latency_lowr_buckets=latency_lowr_buckets,
                 registry=self.registry,
                 custom_labels=custom_labels,
+                label_cardinality_budget=label_cardinality_budget,
             )
             if default_instrumentation:
                 self.instrumentations = [default_instrumentation]
